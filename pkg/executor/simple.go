@@ -174,7 +174,7 @@ func (e *SimpleExec) Next(ctx context.Context, _ *chunk.Chunk) (err error) {
 	case *ast.ReleaseSavepointStmt:
 		err = e.executeReleaseSavepoint(x)
 	case *ast.RollbackStmt:
-		err = e.executeRollback(x)
+		err = e.executeRollback(ctx, x)
 	case *ast.CreateUserStmt:
 		err = e.executeCreateUser(ctx, x)
 	case *ast.AlterUserStmt:
@@ -792,9 +792,20 @@ func (e *SimpleExec) executeCommit() {
 	e.Ctx().GetSessionVars().SetInTxn(false)
 }
 
-func (e *SimpleExec) executeRollback(s *ast.RollbackStmt) error {
+func (e *SimpleExec) executeRollback(ctx context.Context, s *ast.RollbackStmt) error {
 	sessVars := e.Ctx().GetSessionVars()
 	logutil.BgLogger().Debug("execute rollback statement", zap.Uint64("conn", sessVars.ConnectionID))
+
+	wasInTxn := sessVars.InTxn()
+	txnMode := ""
+	if wasInTxn {
+		if sessVars.TxnCtx.IsPessimistic {
+			txnMode = ast.Pessimistic
+		} else {
+			txnMode = ast.Optimistic
+		}
+	}
+
 	txn, err := e.Ctx().Txn(false)
 	if err != nil {
 		return err
@@ -810,6 +821,38 @@ func (e *SimpleExec) executeRollback(s *ast.RollbackStmt) error {
 		txn.RollbackMemDBToCheckpoint(savepointRecord.MemDBCheckpoint)
 		return nil
 	}
+
+	sessVars.SetInTxn(false)
+	if txn.Valid() {
+		duration := time.Since(sessVars.TxnCtx.CreateTime).Seconds()
+		isInternal := false
+		if internal := txn.GetOption(kv.RequestSourceInternal); internal != nil && internal.(bool) {
+			isInternal = true
+		}
+		if isInternal && sessVars.TxnCtx.IsPessimistic {
+			executor_metrics.TransactionDurationPessimisticRollbackInternal.Observe(duration)
+		} else if isInternal && !sessVars.TxnCtx.IsPessimistic {
+			executor_metrics.TransactionDurationOptimisticRollbackInternal.Observe(duration)
+		} else if !isInternal && sessVars.TxnCtx.IsPessimistic {
+			executor_metrics.TransactionDurationPessimisticRollbackGeneral.Observe(duration)
+		} else if !isInternal && !sessVars.TxnCtx.IsPessimistic {
+			executor_metrics.TransactionDurationOptimisticRollbackGeneral.Observe(duration)
+		}
+		sessVars.TxnCtx.ClearDelta()
+		if err := txn.Rollback(); err != nil {
+			return err
+		}
+	}
+
+	if s.CompletionType == ast.CompletionTypeChain {
+		return sessiontxn.GetTxnManager(e.Ctx()).EnterNewTxn(ctx, &sessiontxn.EnterNewTxnRequest{
+			Type:    sessiontxn.EnterNewTxnWithBeginStmt,
+			TxnMode: txnMode,
+		})
+	}
+
+	return nil
+}
 
 	sessVars.SetInTxn(false)
 	if txn.Valid() {

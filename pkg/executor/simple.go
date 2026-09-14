@@ -854,28 +854,6 @@ func (e *SimpleExec) executeRollback(ctx context.Context, s *ast.RollbackStmt) e
 	return nil
 }
 
-	sessVars.SetInTxn(false)
-	if txn.Valid() {
-		duration := time.Since(sessVars.TxnCtx.CreateTime).Seconds()
-		isInternal := false
-		if internal := txn.GetOption(kv.RequestSourceInternal); internal != nil && internal.(bool) {
-			isInternal = true
-		}
-		if isInternal && sessVars.TxnCtx.IsPessimistic {
-			executor_metrics.TransactionDurationPessimisticRollbackInternal.Observe(duration)
-		} else if isInternal && !sessVars.TxnCtx.IsPessimistic {
-			executor_metrics.TransactionDurationOptimisticRollbackInternal.Observe(duration)
-		} else if !isInternal && sessVars.TxnCtx.IsPessimistic {
-			executor_metrics.TransactionDurationPessimisticRollbackGeneral.Observe(duration)
-		} else if !isInternal && !sessVars.TxnCtx.IsPessimistic {
-			executor_metrics.TransactionDurationOptimisticRollbackGeneral.Observe(duration)
-		}
-		sessVars.TxnCtx.ClearDelta()
-		return txn.Rollback()
-	}
-	return nil
-}
-
 func (info *resourceOptionsInfo) loadResourceOptions(userResource []*ast.ResourceOption) error {
 	for _, option := range userResource {
 		switch option.Type {
